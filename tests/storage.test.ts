@@ -55,6 +55,11 @@ describe("analyzeStorage", () => {
     expect(ids).not.toContain("d");
   });
 
+  it("excludes folders", () => {
+    const ids = result.topFiles.map((f) => f.id);
+    expect(ids).not.toContain("e");
+  });
+
   it("groups by category correctly", () => {
     const videoCategory = result.byCategory.find((c) => c.category === "Videos");
     expect(videoCategory?.bytes).toBe(5000);
@@ -75,5 +80,54 @@ describe("analyzeStorage", () => {
     }));
     const r = analyzeStorage(manyFiles, 10);
     expect(r.topFiles).toHaveLength(10);
+  });
+});
+
+describe("analyzeStorage — storage sort order", () => {
+  it("topFiles are sorted by sizeBytes descending (largest first)", () => {
+    const files: DriveFile[] = [
+      { ...base, id: "small", name: "Small.pdf", sizeBytes: 100 },
+      { ...base, id: "large", name: "Large.pdf", sizeBytes: 99999 },
+      { ...base, id: "medium", name: "Medium.pdf", sizeBytes: 5000 },
+    ];
+    const r = analyzeStorage(files, 10);
+    expect(r.topFiles[0].id).toBe("large");
+    expect(r.topFiles[1].id).toBe("medium");
+    expect(r.topFiles[2].id).toBe("small");
+  });
+
+  it("files with null size are NOT included in topFiles (not treated as 0 bytes)", () => {
+    const files: DriveFile[] = [
+      { ...base, id: "known", name: "Known.pdf", sizeBytes: 500 },
+      { ...base, id: "unknown", name: "Unknown.gdoc", mimeType: "application/vnd.google-apps.document", sizeBytes: null },
+    ];
+    const r = analyzeStorage(files, 10);
+    // Only the known-size file appears in topFiles
+    const ids = r.topFiles.map((f) => f.id);
+    expect(ids).toContain("known");
+    expect(ids).not.toContain("unknown");
+  });
+});
+
+describe("analyzeStorage — unknown size grouping", () => {
+  it("filesWithUnknownSize counts only non-trashed, non-folder files with null size", () => {
+    const files: DriveFile[] = [
+      { ...base, id: "a", sizeBytes: null },                                        // counted
+      { ...base, id: "b", sizeBytes: null, trashed: true },                         // excluded (trashed)
+      { ...base, id: "c", sizeBytes: null, isFolder: true },                        // excluded (folder)
+      { ...base, id: "d", sizeBytes: 100 },                                         // excluded (has size)
+    ];
+    const r = analyzeStorage(files, 10);
+    expect(r.filesWithUnknownSize).toBe(1); // only file a
+  });
+
+  it("totalKnownBytes never treats null size as 0", () => {
+    const files: DriveFile[] = [
+      { ...base, id: "a", sizeBytes: 1000 },
+      { ...base, id: "b", sizeBytes: null },  // must NOT contribute 0 to total
+    ];
+    const r = analyzeStorage(files, 10);
+    // Total must be exactly 1000, not 1000 + 0
+    expect(r.totalKnownBytes).toBe(1000);
   });
 });

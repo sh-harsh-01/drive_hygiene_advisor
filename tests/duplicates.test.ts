@@ -107,3 +107,93 @@ describe("findDuplicates — exclusions", () => {
     expect(findDuplicates(files)).toHaveLength(0);
   });
 });
+
+describe("findDuplicates — missing checksum", () => {
+  it("files without md5Checksum skip EXACT tier and fall through to STRONG/POSSIBLE", () => {
+    // Both files have the same name+MIME+size but no checksum — should be STRONG
+    const files: DriveFile[] = [
+      { ...base, id: "a", name: "Budget.xlsx", mimeType: "application/vnd.ms-excel", sizeBytes: 3000, md5Checksum: undefined },
+      { ...base, id: "b", name: "Budget (1).xlsx", mimeType: "application/vnd.ms-excel", sizeBytes: 3000, md5Checksum: undefined },
+    ];
+    const groups = findDuplicates(files);
+    // No EXACT group (no checksums)
+    expect(groups.filter((g) => g.tier === "EXACT")).toHaveLength(0);
+    // STRONG group because same normalized name + MIME + same size
+    const strong = groups.filter((g) => g.tier === "STRONG");
+    expect(strong).toHaveLength(1);
+    expect(strong[0].files.map((f) => f.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("EXACT-matched files are excluded from STRONG/POSSIBLE tiers", () => {
+    // Files a and b share a checksum (EXACT) — must not also appear in STRONG/POSSIBLE
+    const files: DriveFile[] = [
+      { ...base, id: "a", name: "Report.pdf", sizeBytes: 5000, md5Checksum: "same-hash" },
+      { ...base, id: "b", name: "Report (1).pdf", sizeBytes: 5000, md5Checksum: "same-hash" },
+    ];
+    const groups = findDuplicates(files);
+    expect(groups.filter((g) => g.tier === "EXACT")).toHaveLength(1);
+    // The same files must not appear in STRONG or POSSIBLE
+    expect(groups.filter((g) => g.tier !== "EXACT")).toHaveLength(0);
+  });
+});
+
+describe("findDuplicates — missing size (native Google files)", () => {
+  it("groups files with null size + same name+MIME as POSSIBLE (not STRONG)", () => {
+    // Native Google Docs have sizeBytes=null — cannot be STRONG (unknown size)
+    const googleDoc = "application/vnd.google-apps.document";
+    const files: DriveFile[] = [
+      { ...base, id: "a", name: "Meeting Notes.gdoc", mimeType: googleDoc, sizeBytes: null, md5Checksum: undefined },
+      { ...base, id: "b", name: "Meeting Notes (1).gdoc", mimeType: googleDoc, sizeBytes: null, md5Checksum: undefined },
+    ];
+    const groups = findDuplicates(files);
+    // Size is null for both — not all files have known sizes → POSSIBLE
+    expect(groups.filter((g) => g.tier === "EXACT")).toHaveLength(0);
+    expect(groups.filter((g) => g.tier === "STRONG")).toHaveLength(0);
+    const possible = groups.filter((g) => g.tier === "POSSIBLE");
+    expect(possible).toHaveLength(1);
+    // combinedBytes must be null when sizes are unknown
+    expect(possible[0].combinedBytes).toBeNull();
+  });
+
+  it("POSSIBLE group combinedBytes is null when any file has unknown size", () => {
+    const files: DriveFile[] = [
+      { ...base, id: "a", name: "Doc.pdf", sizeBytes: 1000, md5Checksum: undefined },
+      { ...base, id: "b", name: "Doc v2.pdf", sizeBytes: null, md5Checksum: undefined },
+    ];
+    const groups = findDuplicates(files);
+    const possible = groups.filter((g) => g.tier === "POSSIBLE");
+    expect(possible).toHaveLength(1);
+    expect(possible[0].combinedBytes).toBeNull();
+  });
+
+  it("STRONG group combinedBytes equals sum of all file sizes", () => {
+    const files: DriveFile[] = [
+      { ...base, id: "a", name: "Archive.zip", mimeType: "application/zip", sizeBytes: 5000 },
+      { ...base, id: "b", name: "Archive (1).zip", mimeType: "application/zip", sizeBytes: 5000 },
+    ];
+    const groups = findDuplicates(files);
+    const strong = groups.filter((g) => g.tier === "STRONG");
+    expect(strong).toHaveLength(1);
+    expect(strong[0].combinedBytes).toBe(10000);
+  });
+});
+
+describe("findDuplicates — sort order", () => {
+  it("returns groups ordered EXACT → STRONG → POSSIBLE", () => {
+    const files: DriveFile[] = [
+      // POSSIBLE pair
+      { ...base, id: "p1", name: "Notes.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sizeBytes: 100 },
+      { ...base, id: "p2", name: "Notes v2.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sizeBytes: 200 },
+      // STRONG pair
+      { ...base, id: "s1", name: "Budget.pdf", sizeBytes: 500 },
+      { ...base, id: "s2", name: "Budget (1).pdf", sizeBytes: 500 },
+      // EXACT pair
+      { ...base, id: "e1", md5Checksum: "hash-xyz", sizeBytes: 999 },
+      { ...base, id: "e2", md5Checksum: "hash-xyz", sizeBytes: 999 },
+    ];
+    const groups = findDuplicates(files);
+    expect(groups[0].tier).toBe("EXACT");
+    expect(groups[1].tier).toBe("STRONG");
+    expect(groups[2].tier).toBe("POSSIBLE");
+  });
+});

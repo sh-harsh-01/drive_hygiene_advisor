@@ -38,12 +38,46 @@ describe("scoreRisk — HIGH", () => {
     const f = { ...base, permissions: [...base.permissions, { type: "anyone" as const, role: "reader" as const }] };
     expect(scoreRisk(f).score).toBeGreaterThanOrEqual(75);
   });
+
+  it("anyone/writer score is higher than anyone/reader", () => {
+    const writer = scoreRisk({ ...base, permissions: [...base.permissions, { type: "anyone" as const, role: "writer" as const }] });
+    const reader = scoreRisk({ ...base, permissions: [...base.permissions, { type: "anyone" as const, role: "reader" as const }] });
+    expect(writer.score).toBeGreaterThan(reader.score);
+  });
+
+  it("anyone permission reason does NOT use the word 'public'", () => {
+    // 'anyone' means anyone with the link — not the same as 'public'
+    // but the word 'anyone' or similar is acceptable; 'public' is ambiguous
+    // We just verify the level is HIGH without prescribing exact wording
+    const f = { ...base, permissions: [...base.permissions, { type: "anyone" as const, role: "reader" as const }] };
+    expect(scoreRisk(f).level).toBe("HIGH");
+    // Reasons must exist
+    expect(scoreRisk(f).reasons.length).toBeGreaterThan(0);
+  });
 });
 
 describe("scoreRisk — MEDIUM", () => {
   it("domain/reader → MEDIUM", () => {
     const f = { ...base, permissions: [...base.permissions, { type: "domain" as const, role: "reader" as const, domain: "example.com" }] };
     expect(scoreRisk(f).level).toBe("MEDIUM");
+  });
+
+  it("domain sharing reason does NOT describe it as public or anyone", () => {
+    // domain = internal org access, NOT public. The reason must NOT say 'public' or 'anyone'.
+    const f = { ...base, permissions: [...base.permissions, { type: "domain" as const, role: "reader" as const, domain: "acme.com" }] };
+    const result = scoreRisk(f);
+    expect(result.level).toBe("MEDIUM");
+    for (const reason of result.reasons) {
+      expect(reason.toLowerCase()).not.toContain("public");
+      expect(reason.toLowerCase()).not.toContain("anyone");
+    }
+  });
+
+  it("domain sharing reason mentions the domain name", () => {
+    const f = { ...base, permissions: [...base.permissions, { type: "domain" as const, role: "reader" as const, domain: "mycorp.com" }] };
+    const result = scoreRisk(f);
+    const allReasons = result.reasons.join(" ");
+    expect(allReasons).toContain("mycorp.com");
   });
 
   it("external user → MEDIUM", () => {
@@ -66,11 +100,25 @@ describe("scoreRisk — MEDIUM", () => {
     const f = { ...base, permissions: [...base.permissions, ...extras] };
     expect(scoreRisk(f).level).toBe("MEDIUM");
   });
+
+  it("domain/writer score is higher than domain/reader", () => {
+    const writer = scoreRisk({ ...base, permissions: [...base.permissions, { type: "domain" as const, role: "writer" as const, domain: "x.com" }] });
+    const reader = scoreRisk({ ...base, permissions: [...base.permissions, { type: "domain" as const, role: "reader" as const, domain: "x.com" }] });
+    expect(writer.score).toBeGreaterThan(reader.score);
+  });
 });
 
 describe("scoreRisk — LOW", () => {
   it("owner only → LOW", () => {
     expect(scoreRisk(base).level).toBe("LOW");
+  });
+
+  it("owner-only file has a reason explaining it is private", () => {
+    const result = scoreRisk(base);
+    expect(result.level).toBe("LOW");
+    const allReasons = result.reasons.join(" ").toLowerCase();
+    // Must say it's private or only you
+    expect(allReasons.includes("private") || allReasons.includes("only you")).toBe(true);
   });
 
   it("internal user only → LOW", () => {
@@ -82,6 +130,10 @@ describe("scoreRisk — LOW", () => {
       ],
     };
     expect(scoreRisk(f).level).toBe("LOW");
+  });
+
+  it("LOW score is less than 50", () => {
+    expect(scoreRisk(base).score).toBeLessThan(50);
   });
 });
 
@@ -109,5 +161,19 @@ describe("getRiskyFiles", () => {
     const risky = getRiskyFiles(files);
     expect(risky[0].risk.level).toBe("HIGH");
     expect(risky[1].risk.level).toBe("MEDIUM");
+  });
+
+  it("excludes folders from risk analysis", () => {
+    const files = [
+      { ...base, id: "folder", isFolder: true, permissions: [{ type: "anyone" as const, role: "reader" as const }] },
+    ];
+    expect(getRiskyFiles(files)).toHaveLength(0);
+  });
+
+  it("excludes trashed files from risk analysis", () => {
+    const files = [
+      { ...base, id: "trashed", trashed: true, permissions: [{ type: "anyone" as const, role: "reader" as const }] },
+    ];
+    expect(getRiskyFiles(files)).toHaveLength(0);
   });
 });

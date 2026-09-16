@@ -1,6 +1,6 @@
 # DECISIONS.md — Key Product & Technical Decisions
 
-This document describes five important decisions made while building the Drive Hygiene Advisor prototype, explaining the reasoning behind each choice.
+This document describes important decisions made while building the Drive Hygiene Advisor prototype, explaining the reasoning behind each choice.
 
 ---
 
@@ -113,3 +113,108 @@ Key additions:
 - **Distributed cache** (Redis) instead of in-memory cache for multi-instance deployments
 - **Rate-limit-aware fetching** with exponential back-off (already implemented in `google-provider.ts`)
 - **Database storage** for analysis results so they can be queried, filtered, and paginated server-side
+
+---
+
+## Decision 6 — Self-contained Add-on: entire UX inside the Workspace right-side panel
+
+**What I decided:** The complete Drive Hygiene Advisor experience — metadata fetching, all analysis engines, and result rendering — runs inside the Google Workspace Add-on right-side panel using CardService only. No external URL is opened, no browser tab is launched, and no iframe is used.
+
+**Why:**
+
+The interviewer explicitly required this: *"There must be NO external link, NO 'Open Full App' button, and the user must NOT be redirected to the Next.js/Vercel web application."*
+
+The previous architecture used the add-on as a launcher — a card with an "Open Full App" button that opened the Next.js application in a new browser tab. This was functionally correct but violated the requirement that the entire experience must remain inside Google Drive.
+
+This decision required porting the analysis engines from TypeScript (`lib/analysis/`) to Apps Script V8 JavaScript (`addon/Code.gs`). The port is exact — same business rules, same tier definitions, same scoring weights, same error reasons. The TypeScript tests in `tests/` serve as the specification that both implementations must satisfy.
+
+**Approaches evaluated:**
+
+| Approach | Verdict | Reason |
+|---|---|---|
+| Apps Script card as launcher → Next.js app in browser tab | ❌ Rejected | Violates interviewer requirement (no external navigation) |
+| Embed Next.js / HTML directly in side panel | ❌ Not possible | CardService does not support arbitrary HTML, iframes, or React |
+| Rebuild analysis + UI entirely in CardService (Apps Script) | ✅ **Chosen** | Only viable approach that satisfies the requirement |
+
+**Trade-offs documented:**
+
+1. **Execution time limit:** Apps Script functions run synchronously and are bounded at 6 minutes (standard Google accounts) or 30 minutes (Workspace accounts). Very large Drives may not be fully scanned in one pass. The add-on caps fetching at 200 pages × 200 files = 40,000 files and shows a clear message if the cap is reached, rather than failing silently.
+
+2. **CardService widget constraints:** The right-side panel is approximately 280 px wide and is restricted to CardService widgets (`DecoratedText`, `TextParagraph`, `TextButton`, `CardSection`, etc.). No HTML, CSS, or charts are possible. The analysis results are rendered as structured card sections rather than the rich React dashboard in the Next.js app.
+
+3. **No `async/await`:** Apps Script is synchronous. Drive API calls use `Drive.Files.list()` (Advanced Drive Service) which is synchronous. `Utilities.sleep()` is used for retry backoff instead of `setTimeout`.
+
+4. **Analysis portability:** The TypeScript analysis engines in `lib/analysis/` use only pure functions and plain JavaScript data structures (no Node.js APIs, no React, no `googleapis` client). This made porting to Apps Script straightforward. The ported functions use the same variable names, the same logic branches, and the same return shapes.
+
+5. **Next.js app preserved:** The existing Next.js/Vercel application is untouched. It remains a fully functional independent dashboard. The Add-on does not depend on it or link to it in any way.
+
+**Configuration security:** `ScriptProperties` is still used for `DEMO_MODE` (enables mock data). No secrets or external URLs are stored in Script Properties.
+
+---
+
+## Decision 7 — OAuth scopes, Drive API access, and no-write policy
+
+**What I decided:** The Workspace Add-on requests exactly one OAuth scope: `https://www.googleapis.com/auth/drive.metadata.readonly`. No write, delete, content-access, or admin scopes are requested.
+
+**Why:**
+
+### Scope selection rationale
+
+| Scope | Requested | Reason |
+|---|---|---|
+| `drive.metadata.readonly` | **Yes** | Required: provides access to file metadata including `id`, `name`, `mimeType`, `size`, `md5Checksum`, `permissions`, `owners`, `shared`, `trashed` |
+| `drive.addons.metadata.readonly` | No | This narrower scope only works for Drive contextual triggers and does not permit `Drive.Files.list()` calls |
+| `script.container.ui` | No | This scope was in the old manifest to support opening external URLs from Cards. Removed because no external URLs are opened. |
+| `drive.readonly` | No | Allows reading file content — not needed for metadata-only analysis |
+| `drive` | No | Full read/write access — far broader than required; would justifiably concern users |
+
+### Drive API fields fetched (metadata-only)
+
+```
+id, name, mimeType, size, md5Checksum,
+createdTime, modifiedTime, webViewLink,
+owners, permissions, shared, trashed
+```
+
+File content is never requested, read, or downloaded.
+
+### Pagination
+
+Drive API responses are paginated. A single list response contains at most `pageSize` files (we use 200 per page). The add-on fetches pages in a loop using `nextPageToken` until either:
+- `nextPageToken` is absent (all files fetched), or
+- The safety cap of `MAX_PAGES = 200` pages is reached.
+
+This cursor-based approach means the add-on never assumes it has fetched all files from a single response.
+
+### Metadata-only duplicate detection
+
+MD5 checksums (`md5Checksum` field) are computed server-side by Google for binary files uploaded to Drive. They are **unavailable** for native Google Docs, Sheets, Slides, and Forms because those files exist only in Google's proprietary format and have no binary content to hash.
+
+Consequently:
+- Native Google files fall through to the STRONG or POSSIBLE tiers based on name+MIME+size.
+- The `md5Checksum` field is used as a binary-identity proof only when Google provides it.
+- No additional scope is needed for checksums — they are included in `drive.metadata.readonly`.
+
+### Missing file sizes
+
+Native Google Docs, Sheets, Slides, and Forms do not expose a `size` field. The add-on:
+- Never treats a missing size as 0 bytes.
+- Marks such files as `sizeBytes: null`.
+- Counts them separately as "files with unknown size" in the storage summary.
+- Excludes them from the size ranking and storage totals.
+
+### Risk classification
+
+The `permissions` field (included in `drive.metadata.readonly`) returns the full sharing permission list for each file. This enables the three-level risk classification:
+
+| Level | Criteria | Description |
+|---|---|---|
+| HIGH | `type: 'anyone'` permission exists | Anyone with the link can access the file (closest to public in Drive) |
+| MEDIUM | `type: 'domain'` sharing, external users, or ≥5 non-owner recipients | Broad organizational or external exposure |
+| LOW | Owner-only or limited internal sharing | No significant sharing risk |
+
+Important: `domain` sharing means *accessible to everyone in the organization's Workspace domain* — it is internal, not public. Risk reasons never describe domain sharing as public or as "anyone".
+
+### No deletion or remediation
+
+This is a read-only analysis application. The add-on has no ability to delete, rename, move, or modify any Drive files. The `drive.metadata.readonly` scope does not permit any write operations. This is by design and is documented clearly in the UI.

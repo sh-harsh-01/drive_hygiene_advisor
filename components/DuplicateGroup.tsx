@@ -11,8 +11,8 @@ interface Props {
 }
 
 const TIER_CONFIG = {
-  EXACT:    { label: "Exact duplicate",   bg: "#fce8e6", text: "#c5221f", border: "#f5c6c2" },
-  STRONG:   { label: "Strong candidate",  bg: "#fef7e0", text: "#b06000", border: "#f9d976" },
+  EXACT: { label: "Exact duplicate", bg: "#fce8e6", text: "#c5221f", border: "#f5c6c2" },
+  STRONG: { label: "Strong candidate", bg: "#fef7e0", text: "#b06000", border: "#f9d976" },
   POSSIBLE: { label: "Possible candidate", bg: "var(--google-blue-light)", text: "var(--google-blue)", border: "#c5d9f7" },
 };
 
